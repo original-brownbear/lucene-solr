@@ -21,6 +21,7 @@ import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Iterator;
 import java.util.List;
+import java.util.stream.LongStream;
 
 import org.apache.lucene.analysis.MockAnalyzer;
 import org.apache.lucene.document.Document;
@@ -389,20 +390,15 @@ public class TestTieredMergePolicy extends BaseMergePolicyTestCase {
     w.forceMergeDeletes();
     checkSegmentsInExpectations(w, segNamesBefore, false);  // There should have been no merges.
 
-    final long aggregateSize = w.cloneSegmentInfos().asList().stream().mapToLong(s -> {
+    final long[] segmentSizes = w.cloneSegmentInfos().asList().stream().mapToLong(s -> {
       try {
         return s.sizeInBytes();
       } catch (IOException e) {
         throw new AssertionError(e);
       }
-    }).sum();
-    final long maxSize = w.cloneSegmentInfos().asList().stream().mapToLong(s -> {
-      try {
-        return s.sizeInBytes();
-      } catch (IOException e) {
-        throw new AssertionError(e);
-      }
-    }).max().orElseThrow(() -> new AssertionError("Should have at least one segment."));
+    }).toArray();
+    final long aggregateSize = LongStream.of(segmentSizes).sum();
+    final long maxSize = LongStream.of(segmentSizes).max().orElseThrow(() -> new AssertionError("Should have at least one segment."));
     final int segCount = random().nextInt(w.cloneSegmentInfos().size() - 2) + 2;
     // We should not get more than twice the average segment size here, given that all the segments we're merging
     // are approximately the same size
