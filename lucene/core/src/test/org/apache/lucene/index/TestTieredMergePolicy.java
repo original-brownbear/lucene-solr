@@ -19,9 +19,10 @@ package org.apache.lucene.index;
 
 import java.io.IOException;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.Iterator;
 import java.util.List;
-import java.util.stream.LongStream;
+import java.util.Map;
 
 import org.apache.lucene.analysis.MockAnalyzer;
 import org.apache.lucene.document.Document;
@@ -364,52 +365,34 @@ public class TestTieredMergePolicy extends BaseMergePolicyTestCase {
   // LUCENE-8688 reports that force merges merged more segments that necessary to respect maxSegmentCount as a result
   // of LUCENE-7976 so we ensure that it only does the minimum number of merges here.
   public void testForcedMergesUseLeastNumberOfMerges() throws Exception {
-    final Directory dir = newDirectory();
-    final IndexWriterConfig conf = newIndexWriterConfig(new MockAnalyzer(random()));
     final TieredMergePolicy tmp = new TieredMergePolicy();
+    final double maxSegmentSize = 10.0D;
+    tmp.setMaxMergedSegmentMB(maxSegmentSize);
 
-    final int numDocs = atLeast(2400);
-    double mbSize = 0.004;
-    tmp.setMaxMergedSegmentMB(mbSize);
-    conf.setMaxBufferedDocs(100);
-    conf.setMergePolicy(tmp);
-
-    final IndexWriter w = new IndexWriter(dir, conf);
-
-    for (int i = 0; i < numDocs; i++) {
-      Document doc = new Document();
-      doc.add(newStringField("id", "" + i, Field.Store.NO));
-      doc.add(newTextField("content", "aaa " + i, Field.Store.NO));
-      w.addDocument(doc);
+    SegmentInfos infos = new SegmentInfos(Version.LATEST.major);
+    final double oneSegmentSize = 1.0D;
+    int i = 0;
+    for (int j = 0; j < 30; ++j) {
+      infos.add(makeSegmentCommitInfo("_" + i, 1000, 0, oneSegmentSize, IndexWriter.SOURCE_MERGE));
     }
 
-    w.commit();
-
-    // These should be no-ops on an index with no deletions and segments are pretty big.
-    List<String> segNamesBefore = getSegmentNames(w);
-    w.forceMergeDeletes();
-    checkSegmentsInExpectations(w, segNamesBefore, false);  // There should have been no merges.
-
-    final long[] segmentSizes = w.cloneSegmentInfos().asList().stream().mapToLong(s -> {
-      try {
-        return s.sizeInBytes();
-      } catch (IOException e) {
-        throw new AssertionError(e);
-      }
-    }).toArray();
-    final long aggregateSize = LongStream.of(segmentSizes).sum();
-    final long maxSize = LongStream.of(segmentSizes).max().orElseThrow(() -> new AssertionError("Should have at least one segment."));
-    final int segCount = random().nextInt(w.cloneSegmentInfos().size() - 2) + 2;
-    // We should not get more than twice the average segment size here, given that all the segments we're merging
-    // are approximately the same size
-    long maxSegBytes = Math.max((aggregateSize / segCount) * 2L, maxSize);
-    w.forceMerge(segCount);
-    assertEquals("There should be exactly " + segCount + " segments.", segCount, w.getSegmentCount());
-    checkSegmentSizeNotExceeded(w.cloneSegmentInfos(), maxSegBytes);
-
-    w.close();
-
-    dir.close();
+    final MockMergeContext mergeContext = new MockMergeContext(SegmentCommitInfo::getDelCount);
+    final Map<SegmentCommitInfo, Boolean> segmentsToMerge = new HashMap<>();
+    for (SegmentCommitInfo info : infos) {
+      assert info != null;
+      segmentsToMerge.put(info, Boolean.TRUE);
+    }
+    final MergeSpecification specification = tmp.findForcedMerges(infos, 4, segmentsToMerge, mergeContext);
+    assertEquals(3, specification.merges.size());
+    for (OneMerge merge : specification.merges) {
+      assertTrue(merge.segments.stream().mapToLong(s -> {
+        try {
+          return s.sizeInBytes();
+        } catch (IOException e) {
+          throw new AssertionError(e);
+        }
+      }).sum() < 1024 * 1024 * maxSegmentSize * 1.5);
+    }
   }
 
   // Having a segment with very few documents in it can happen because of the random nature of the
