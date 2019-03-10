@@ -19,6 +19,7 @@ package org.apache.lucene.index;
 
 import java.io.IOException;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.Iterator;
 import java.util.List;
@@ -366,24 +367,82 @@ public class TestTieredMergePolicy extends BaseMergePolicyTestCase {
   // of LUCENE-7976 so we ensure that it only does the minimum number of merges here.
   public void testForcedMergesUseLeastNumberOfMerges() throws Exception {
     final TieredMergePolicy tmp = new TieredMergePolicy();
+    final double oneSegmentSize = 1.0D;
+    final double maxSegmentSize = 10 * oneSegmentSize;
+    tmp.setMaxMergedSegmentMB(maxSegmentSize);
+
+    SegmentInfos infos = new SegmentInfos(Version.LATEST.major);
+    for (int j = 0; j < 30; ++j) {
+      infos.add(makeSegmentCommitInfo("_" + j, 1000, 0, oneSegmentSize, IndexWriter.SOURCE_MERGE));
+    }
+
+    final int expectedCount = random().nextInt(10) + 3;
+    final MergeSpecification specification =
+        tmp.findForcedMerges(infos, expectedCount, segmentsToMerge(infos), new MockMergeContext(SegmentCommitInfo::getDelCount));
+    assertMaxSize(specification, maxSegmentSize);
+    final int resultingCount =
+        infos.size() + specification.merges.size() - specification.merges.stream().mapToInt(spec -> spec.segments.size()).sum();
+    assertEquals(expectedCount, resultingCount);
+
+    SegmentInfos manySegmentsInfos = new SegmentInfos(Version.LATEST.major);
+    final int manySegmentsCount = atLeast(100);
+    for (int j = 0; j < manySegmentsCount; ++j) {
+      manySegmentsInfos.add(makeSegmentCommitInfo("_" + j, 1000, 0, 0.1D, IndexWriter.SOURCE_MERGE));
+    }
+
+    final MergeSpecification specificationManySegments = tmp.findForcedMerges(
+        manySegmentsInfos, expectedCount, segmentsToMerge(manySegmentsInfos), new MockMergeContext(SegmentCommitInfo::getDelCount));
+    assertMaxSize(specificationManySegments, maxSegmentSize);
+    final int resultingCountManySegments = manySegmentsInfos.size() + specificationManySegments.merges.size()
+        - specificationManySegments.merges.stream().mapToInt(spec -> spec.segments.size()).sum();
+    assertTrue(resultingCountManySegments >= expectedCount);
+  }
+
+  // Make sure that TieredMergePolicy doesn't do the final merge while there are merges ongoing, but does do non-final
+  // merges while merges are ongoing.
+  public void testForcedMergeWithPending() throws Exception {
+    final TieredMergePolicy tmp = new TieredMergePolicy();
     final double maxSegmentSize = 10.0D;
     tmp.setMaxMergedSegmentMB(maxSegmentSize);
 
     SegmentInfos infos = new SegmentInfos(Version.LATEST.major);
-    final double oneSegmentSize = 1.0D;
-    int i = 0;
     for (int j = 0; j < 30; ++j) {
-      infos.add(makeSegmentCommitInfo("_" + i, 1000, 0, oneSegmentSize, IndexWriter.SOURCE_MERGE));
+      infos.add(makeSegmentCommitInfo("_" + j, 1000, 0, 1.0D, IndexWriter.SOURCE_MERGE));
+    }
+    final MockMergeContext mergeContext = new MockMergeContext(SegmentCommitInfo::getDelCount);
+    mergeContext.setMergingSegments(Collections.singleton(infos.asList().get(0)));
+    final int expectedCount = random().nextInt(10) + 3;
+    final MergeSpecification specification = tmp.findForcedMerges(infos, expectedCount, segmentsToMerge(infos), mergeContext);
+    // Since we have fewer than 30 (the max merge count) segments more than the final size this would have been the final merge
+    // so we check that it was prevented.
+    assertNull(specification);
+
+    SegmentInfos manySegmentsInfos = new SegmentInfos(Version.LATEST.major);
+    final int manySegmentsCount = atLeast(500);
+    for (int j = 0; j < manySegmentsCount; ++j) {
+      manySegmentsInfos.add(makeSegmentCommitInfo("_" + j, 1000, 0, 0.1D, IndexWriter.SOURCE_MERGE));
     }
 
-    final MockMergeContext mergeContext = new MockMergeContext(SegmentCommitInfo::getDelCount);
+    // We set one merge to be ongoing. Since we have more than 30 (the max merge count) times the number of segments
+    // of that we want to merge to this is not the final merge and hence the returned specification must not be null.
+    mergeContext.setMergingSegments(Collections.singleton(manySegmentsInfos.asList().get(0)));
+    final MergeSpecification specificationManySegments =
+        tmp.findForcedMerges(manySegmentsInfos, expectedCount, segmentsToMerge(manySegmentsInfos), mergeContext);
+    assertMaxSize(specificationManySegments, maxSegmentSize);
+    final int resultingCountManySegments = manySegmentsInfos.size() + specificationManySegments.merges.size()
+        - specificationManySegments.merges.stream().mapToInt(spec -> spec.segments.size()).sum();
+    assertTrue(resultingCountManySegments >= expectedCount);
+  }
+
+  private static Map<SegmentCommitInfo, Boolean> segmentsToMerge(SegmentInfos infos) {
     final Map<SegmentCommitInfo, Boolean> segmentsToMerge = new HashMap<>();
     for (SegmentCommitInfo info : infos) {
-      assert info != null;
       segmentsToMerge.put(info, Boolean.TRUE);
     }
-    final MergeSpecification specification = tmp.findForcedMerges(infos, 4, segmentsToMerge, mergeContext);
-    assertEquals(3, specification.merges.size());
+    return segmentsToMerge;
+  }
+
+  private static void assertMaxSize(MergeSpecification specification, double maxSegmentSizeMb) {
     for (OneMerge merge : specification.merges) {
       assertTrue(merge.segments.stream().mapToLong(s -> {
         try {
@@ -391,7 +450,7 @@ public class TestTieredMergePolicy extends BaseMergePolicyTestCase {
         } catch (IOException e) {
           throw new AssertionError(e);
         }
-      }).sum() < 1024 * 1024 * maxSegmentSize * 1.5);
+      }).sum() < 1024 * 1024 * maxSegmentSizeMb * 1.5);
     }
   }
 
